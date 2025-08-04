@@ -1,0 +1,40 @@
+name: nimslo_processing
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # core python
+  - python=3.11
+  
+  # jupyter ecosystem
+  - jupyter
+  - jupyterlab
+  - ipywidgets
+  - notebook
+  
+  # core data science
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  
+  # computer vision & image processing
+  - opencv
+  - pillow
+  - scikit-learn
+  - scikit-image
+  - imageio
+  
+  # additional useful packages
+  - tqdm  # progress bars
+  - seaborn  # better plotting
+  - plotly  # interactive plots
+  
+  # pip packages not available in conda
+  - pip
+  - pip:
+    - opencv-contrib-python  # extra opencv features
+    
+# optional: pin specific versions for reproducibility
+# - numpy=1.24.3
+# - opencv=4.8.0

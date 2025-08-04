@@ -1,0 +1,31 @@
+# nimslo processing requirements
+# alternative to conda environment for pip-only workflows
+
+# core data science
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.6.0
+pandas>=1.5.0
+
+# computer vision & image processing
+opencv-python>=4.7.0
+opencv-contrib-python>=4.7.0
+pillow>=9.5.0
+scikit-learn>=1.2.0
+scikit-image>=0.20.0
+imageio>=2.25.0
+
+# jupyter ecosystem
+jupyter>=1.0.0
+jupyterlab>=3.6.0
+ipywidgets>=8.0.0
+notebook>=6.5.0
+
+# additional useful packages
+tqdm>=4.64.0
+seaborn>=0.12.0
+plotly>=5.13.0
+
+# if you need specific versions, pin them like:
+# numpy==1.24.3
+# opencv-python==4.8.0.74
