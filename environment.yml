@@ -32,6 +32,7 @@ dependencies:
   - tqdm  # progress bars
   - seaborn  # better plotting
   - plotly  # interactive plots
+  - rich  # terminal ui
   
   # pip packages not available in conda
   - pip

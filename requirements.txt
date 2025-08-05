@@ -18,6 +18,9 @@ imageio>=2.25.0
 # deep learning for cnn alignment
 tensorflow>=2.15.0
 
+# terminal ui
+rich>=13.0.0
+
 # jupyter ecosystem
 jupyter>=1.0.0
 jupyterlab>=3.6.0

@@ -25,6 +25,22 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import time
 from functools import partial
 
+# terminal ui imports
+try:
+    from rich.console import Console
+    from rich.prompt import Prompt, IntPrompt
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.columns import Columns
+    from rich.text import Text
+    from rich.progress import track
+    from rich.syntax import Syntax
+    from rich import print as rprint
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+    print("⚠️  rich not available, falling back to basic terminal ui")
+
 # for gif creation
 from PIL import Image as PILImage
 import imageio
@@ -322,35 +338,224 @@ class NimsloProcessor:
         return self.select_images_manually(image_files)
     
     def select_images_manually(self, image_files):
-        """manual image selection interface"""
-        print("🎯 opening image selector...")
-        print("💡 tip: select 3+ images (3=bounce, 4=standard, 5+=continuous)")
+        """manual image selection interface using terminal ui"""
+        if RICH_AVAILABLE:
+            return self._select_images_rich(image_files)
+        else:
+            return self._select_images_basic(image_files)
         
-        # create selection window with error handling
+    def _select_images_rich(self, image_files):
+        """rich terminal ui image selector"""
+        console = Console()
+        
+        # show header
+        console.print(Panel.fit(
+            "📸 [bold cyan]Nimslo Image Selector[/bold cyan] 📸\n"
+            "💡 [dim]select 3+ images (3=bounce, 4=standard, 5+=continuous)[/dim]",
+            style="blue"
+        ))
+        
+        # create image table with metadata
+        table = Table(title="📁 Available Images", show_header=True, header_style="bold magenta")
+        table.add_column("Index", style="cyan", width=6)
+        table.add_column("Filename", style="green", min_width=25)
+        table.add_column("Size", style="yellow", width=8)
+        table.add_column("Modified", style="blue", width=12)
+        
+        # add images to table
+        for i, img_path in enumerate(image_files):
+            try:
+                stat = os.stat(img_path)
+                size_mb = stat.st_size / (1024 * 1024)
+                mod_time = time.strftime("%m/%d %H:%M", time.localtime(stat.st_mtime))
+                
+                table.add_row(
+                    f"[bold]{i+1}[/bold]",
+                    os.path.basename(img_path),
+                    f"{size_mb:.1f}MB",
+                    mod_time
+                )
+            except Exception as e:
+                table.add_row(f"[bold]{i+1}[/bold]", os.path.basename(img_path), "?", "?")
+        
+        console.print(table)
+        
+        # selection input with examples
+        console.print("\n[bold green]Selection Examples:[/bold green]")
+        console.print("  • [cyan]1,3,5,7[/cyan] - select specific images")
+        console.print("  • [cyan]1-4[/cyan] - select range (images 1 through 4)")
+        console.print("  • [cyan]1,3-6,8[/cyan] - mixed selection")
+        console.print("  • [cyan]all[/cyan] - select all images")
+        
+        # get selection
+        selection = Prompt.ask("\n📸 [bold]Enter your selection[/bold]", default="1-4")
+        
+        # parse selection
         try:
-            root = tk.Tk()
-            root.title("select nimslo images")
-            root.geometry("1200x800")
+            selected_indices = self._parse_selection(selection, len(image_files))
+            selected_files = [image_files[i] for i in selected_indices]
+            
+            # confirm selection
+            console.print(f"\n✅ [bold green]Selected {len(selected_files)} images:[/bold green]")
+            for i, file_path in enumerate(selected_files):
+                console.print(f"  {i+1}. [green]{os.path.basename(file_path)}[/green]")
+            
+            # load selected images
+            console.print(f"\n🔄 [bold]Loading {len(selected_files)} images...[/bold]")
+            images = []
+            
+            for file_path in track(selected_files, description="📖 Loading images..."):
+                img = cv2.imread(file_path)
+                if img is not None:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    images.append(img_rgb)
+                else:
+                    console.print(f"❌ [red]failed to load: {file_path}[/red]")
+            
+            if images:
+                self.images = images
+                self.image_paths = selected_files
+                console.print(f"✅ [bold green]loaded {len(images)} images successfully![/bold green]\n")
+                return True
+            else:
+                console.print("❌ [red]no images loaded successfully[/red]")
+                return False
+                
         except Exception as e:
-            print(f"❌ failed to create selection window: {e}")
-            return []
+            console.print(f"❌ [red]selection error: {e}[/red]")
+            return False
+    
+    def _select_images_basic(self, image_files):
+        """basic terminal image selector (fallback)"""
+        print("\n📸 nimslo image selector")
+        print("💡 tip: select 3+ images (3=bounce, 4=standard, 5+=continuous)")
+        print("=" * 60)
         
-        # create main frame
-        main_frame = ttk.Frame(root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # show images
+        print(f"📁 found {len(image_files)} images:")
+        for i, img_path in enumerate(image_files[:20]):  # limit display
+            print(f"  {i+1:2d}: {os.path.basename(img_path)}")
         
-        # left side - available images
-        left_frame = ttk.Frame(main_frame)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        if len(image_files) > 20:
+            print(f"  ... and {len(image_files)-20} more images")
         
-        ttk.Label(left_frame, text="available images:").pack()
+        print("\n💡 selection examples:")
+        print("  • 1,3,5,7 - specific images")
+        print("  • 1-4 - range selection")
+        print("  • 1,3-6,8 - mixed selection")
         
-        available_listbox = tk.Listbox(left_frame, selectmode=tk.EXTENDED)
-        available_scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=available_listbox.yview)
-        available_listbox.configure(yscrollcommand=available_scrollbar.set)
+        # get selection
+        selection = input("\n📸 enter your selection: ").strip()
         
-        available_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        available_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        try:
+            selected_indices = self._parse_selection(selection, len(image_files))
+            selected_files = [image_files[i] for i in selected_indices]
+            
+            print(f"\n✅ selected {len(selected_files)} images:")
+            for i, file_path in enumerate(selected_files):
+                print(f"  {i+1}. {os.path.basename(file_path)}")
+            
+            # load images
+            print(f"\n🔄 loading {len(selected_files)} images...")
+            images = []
+            
+            for i, file_path in enumerate(selected_files):
+                img = cv2.imread(file_path)
+                if img is not None:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    images.append(img_rgb)
+                    print(f"✅ loaded image {i+1}: {os.path.basename(file_path)} ({img_rgb.shape})")
+                else:
+                    print(f"❌ failed to load: {file_path}")
+            
+            if images:
+                self.images = images
+                self.image_paths = selected_files
+                print(f"✅ loaded {len(images)} images successfully!\n")
+                return True
+            else:
+                print("❌ no images loaded successfully")
+                return False
+                
+        except Exception as e:
+            print(f"❌ selection error: {e}")
+            return False
+    
+    def _parse_selection(self, selection, max_count):
+        """parse selection string into list of indices"""
+        selection = selection.strip().lower()
+        indices = []
+        
+        if selection == "all":
+            return list(range(max_count))
+        
+        # split by commas
+        parts = [part.strip() for part in selection.split(',')]
+        
+        for part in parts:
+            if '-' in part:
+                # handle ranges like 1-4
+                start, end = part.split('-')
+                start_idx = int(start) - 1
+                end_idx = int(end) - 1
+                if 0 <= start_idx <= end_idx < max_count:
+                    indices.extend(range(start_idx, end_idx + 1))
+            else:
+                # handle single numbers
+                idx = int(part) - 1
+                if 0 <= idx < max_count:
+                    indices.append(idx)
+        
+        # remove duplicates and sort
+        return sorted(list(set(indices)))
+
+    def preview_alignment(self, title="alignment preview"):
+        """preview aligned images in a grid"""
+        images = self.aligned_images if self.aligned_images else self.images
+        self.show_images(images, title)
+    
+    def show_images(self, images=None, title="nimslo batch", save_path=None):
+        """display loaded images in a grid"""
+        if images is None:
+            images = self.images
+            
+        if not images:
+            print("❌ no images to display")
+            return
+            
+        n_images = len(images)
+        cols = min(4, n_images)
+        rows = (n_images + cols - 1) // cols
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(15, 4*rows))
+        fig.suptitle(title, fontsize=16)
+        
+        if rows == 1:
+            axes = [axes] if cols == 1 else axes
+        else:
+            axes = axes.flatten()
+            
+        for i, img in enumerate(images):
+            axes[i].imshow(img)
+            axes[i].set_title(f"frame {i+1}")
+            axes[i].axis('off')
+            
+        # hide unused subplots
+        for i in range(n_images, len(axes)):
+            axes[i].axis('off')
+            
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"💾 saved preview to: {save_path}")
+        
+        # always show the plot
+        plt.show()
+        
+        # add a small delay to ensure window appears
+        import time
+        time.sleep(0.5)
         
         # center - preview area
         center_frame = ttk.Frame(main_frame)
