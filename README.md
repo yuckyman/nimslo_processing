@@ -1,61 +1,74 @@
-# auto-aligning gif-ifying python code to process nimslo batches
+# nimslo auto-aligning gif processor
 
-## intuition
-- select four to six images from set of developed film
-- using convolutional neural networks, align four images to a manually selected point
-- match histogram of four images, non-aggressively, to match exposure/brightness
-- export gif of four images, aligned and matched, to a predetermined folder
+## 🎬 what it does
+- processes nimslo 3d film shots into smooth animated gifs
+- uses cnn-based border detection for precise alignment
+- applies histogram matching for consistent exposure
+- creates bounce-effect gifs with automatic quality optimization
 
-## stipulations
-- jupyter notebook (for use as hugo site later)
-- visualize/demonstrate as much as possible
-- small gui to select images, crop, and select reference point
-- lightweight, self-contained (conda managed)
+## ✨ features
+- **manual image selection** - pick and order your best 4-6 frames
+- **cnn alignment** - sophisticated border detection and image subtraction
+- **automatic cropping** - removes black bars from aligned images
+- **quality settings** - high, medium, or optimized output
+- **bounce effect** - smooth back-and-forth animation
+- **streamlined workflow** - no confirmation dialogs, just results
 
 ## 🚀 quick start
 
-### environment setup
+### one-command setup
 ```bash
-# create conda environment
-make setup
-# or manually: conda env create -f environment.yml
-
-# activate environment
-conda activate nimslo_processing
-
-# start jupyter lab
-make lab
-# or manually: jupyter lab
+# from anywhere on your system
+nimslo
 ```
 
-### processing workflow
-1. open `processor.ipynb`
-2. run all cells to load functions
-3. use `process_nimslo_batch(processor)` for automated pipeline
-4. or run step-by-step for more control
+that's it! the alias will:
+1. activate the conda environment
+2. run the processor with full gui
+3. generate your nimslo gif automatically
 
-## 🐍 environment management
-
-### local → remote sync
+### first-time setup
 ```bash
-# after installing new packages locally
-make export                    # export environment
-git add environment.yml        # commit changes
-git push                       # sync to remote
+# clone and setup
+git clone <repo-url>
+cd nimslo_processing
 
-# on remote server
-git pull                       # get latest environment
-make update                    # update conda environment
-# restart jupyter kernel
+# create environment and alias
+conda env create -f environment.yml
+echo 'alias nimslo="cd $(pwd) && ./run_nimslo.sh"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
-### available commands
-- `make setup` - initial environment creation
-- `make update` - update from environment.yml
-- `make export` - export current environment
-- `make verify` - test package installation
-- `make lab` - start jupyter lab
-- `make clean` - remove environment
+## 🎯 workflow
+1. **run `nimslo`** - launches the processor
+2. **select folder** - choose your nimslo image directory
+3. **pick images** - use the gui to select and order 4-6 frames
+4. **crop area** - drag to select the region to align
+5. **automatic processing** - cnn alignment, histogram matching, gif creation
+6. **output** - find your gif in `nimslo_gifs/`
 
-see `environment_setup.md` for detailed workflow guide
+## 📁 output
+- **gifs** saved to `nimslo_gifs/nimslo_high_TIMESTAMP.gif`
+- **previews** saved as `preview_original.png`, `preview_aligned.png`, `preview_final.png`
+- **quality levels** indicated in filename
 
+## 🔧 technical details
+- **cnn border detection** - uses tensorflow for precise alignment
+- **image subtraction** - photoshop-style difference calculation
+- **fallback system** - graceful degradation to canny edge detection
+- **automatic cropping** - removes transformation artifacts
+- **bounce animation** - forward + backward sequence for smooth motion
+
+## 📦 dependencies
+- tensorflow 2.16+ (for cnn alignment)
+- opencv-python (computer vision)
+- pillow (image processing)
+- matplotlib (previews)
+- tkinter (gui)
+
+all managed via conda environment - just run `conda env create -f environment.yml`
+
+---
+
+**made with ❤️  for analog photography lovers**  
+*turning nimslo film into digital magic* ✨

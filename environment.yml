@@ -25,6 +25,9 @@ dependencies:
   - scikit-image
   - imageio
   
+  # deep learning for cnn alignment
+  - tensorflow
+  
   # additional useful packages
   - tqdm  # progress bars
   - seaborn  # better plotting
@@ -38,3 +41,4 @@ dependencies:
 # optional: pin specific versions for reproducibility
 # - numpy=1.24.3
 # - opencv=4.8.0
+# - tensorflow=2.15.0
