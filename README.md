@@ -44,8 +44,9 @@ source ~/.zshrc
 2. **select folder** - choose your nimslo image directory
 3. **pick images** - use the gui to select and order 4-6 frames
 4. **crop area** - drag to select the region to align
-5. **automatic processing** - cnn alignment, histogram matching, gif creation
-6. **output** - find your gif in `nimslo_gifs/`
+5. **add reference points** - double-click to mark alignment points (optional but recommended)
+6. **automatic processing** - intelligent alignment, histogram matching, gif creation
+7. **output** - find your gif in `nimslo_gifs/`
 
 ## 📁 output
 - **gifs** saved to `nimslo_gifs/nimslo_high_TIMESTAMP.gif`
@@ -53,18 +54,21 @@ source ~/.zshrc
 - **quality levels** indicated in filename
 
 ## 🔧 technical details
-- **cnn border detection** - uses tensorflow for precise alignment
-- **image subtraction** - photoshop-style difference calculation
-- **fallback system** - graceful degradation to canny edge detection
+- **intelligent alignment** - reference point-based (photoshop-style) or cnn border detection
+- **sift feature matching** - robust point correspondence detection
+- **multi-transformation support** - homography (3+ points) or affine (2 points)
+- **quality validation** - ssim, mse, and point error metrics for alignment assessment
+- **fallback system** - graceful degradation when point matching fails
 - **automatic cropping** - removes transformation artifacts
 - **bounce animation** - forward + backward sequence for smooth motion
 
 ## 📦 dependencies
 - tensorflow 2.16+ (for cnn alignment)
-- opencv-python (computer vision)
+- opencv-python (computer vision + sift features)
 - pillow (image processing)
 - matplotlib (previews)
 - tkinter (gui)
+- scikit-image (quality metrics)
 
 all managed via conda environment - just run `conda env create -f environment.yml`
 

@@ -22,7 +22,7 @@ fi
 
 # activate environment and run processor
 echo "🚀 activating nimslo_processing environment..."
-source $(conda info --base)/etc/profile.d/conda.sh
+source /Users/ian/miniconda3/etc/profile.d/conda.sh
 conda activate nimslo_processing
 
 # check if processor script exists

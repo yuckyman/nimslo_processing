@@ -27,6 +27,7 @@ import imageio
 from sklearn.feature_extraction import image
 from scipy import ndimage
 from scipy.spatial.distance import cdist
+from skimage.metrics import structural_similarity as ssim
 
 # for cnn-based alignment
 try:
@@ -36,7 +37,7 @@ try:
     import tensorflow.keras.backend as K
     TENSORFLOW_AVAILABLE = True
     print("✅ tensorflow available for cnn alignment")
-except ImportError:
+except ImportError as e:
     TENSORFLOW_AVAILABLE = False
     print("⚠️  tensorflow not available - cnn alignment will use fallback methods")
 
@@ -57,13 +58,31 @@ class NimsloProcessor:
         self.crop_box = None
         self.all_image_files = []  # store all found images
         
+    def reset(self):
+        """reset processor state for next batch"""
+        self.images = []
+        self.image_paths = []
+        self.reference_points = []
+        self.aligned_images = []
+        self.matched_images = []
+        self.crop_box = None
+        self.all_image_files = []
+        
+        # force garbage collection to clean up tkinter resources
+        import gc
+        gc.collect()
+        
     def load_images(self, folder_path=None):
         """load images from folder or file dialog"""
         if folder_path is None:
-            root = tk.Tk()
-            root.withdraw()
-            folder_path = filedialog.askdirectory(title="select nimslo batch folder")
-            root.destroy()
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                folder_path = filedialog.askdirectory(title="select nimslo batch folder")
+                root.destroy()
+            except Exception as e:
+                print(f"❌ folder dialog error: {e}")
+                return False
         
         if not folder_path:
             print("❌ no folder selected")
@@ -344,11 +363,17 @@ class NimsloProcessor:
                 else:
                     print(f"❌ failed to load: {path}")
             
-            root.destroy()
+            try:
+                root.destroy()
+            except:
+                pass
         
         def cancel():
             """cancel selection"""
-            root.destroy()
+            try:
+                root.destroy()
+            except:
+                pass
         
         # add buttons
         ttk.Button(button_frame, text="add →", command=add_selected).pack(side=tk.LEFT, padx=5)
@@ -415,35 +440,7 @@ class NimsloProcessor:
         import time
         time.sleep(0.5)
 
-def preview_alignment(self, title="alignment preview"):
-    """show alignment results with user confirmation"""
-    if not self.aligned_images:
-        print("❌ no aligned images to preview")
-        return False
-        
-    print(f"\n🎯 {title}:")
-    print("   - check the preview window that should appear")
-    print("   - images should be aligned to the reference")
-    print("   - close the preview window when done viewing")
-    
-    self.show_images(self.aligned_images, title, save_path="preview_aligned.png")
-    
-    return True
-
-def preview_final(self, title="final preview"):
-    """show final processed images with user confirmation"""
-    if not self.matched_images:
-        print("❌ no processed images to preview")
-        return False
-        
-    print(f"\n🎬 {title}:")
-    print("   - check the preview window that should appear")
-    print("   - images should have consistent exposure")
-    print("   - close the preview window when done viewing")
-    
-    self.show_images(self.matched_images, title, save_path="preview_final.png")
-    
-    return True
+# preview functions removed for streamlined processing
 
 class InteractiveCropper:
     """interactive gui for selecting crop area and reference points"""
@@ -740,36 +737,33 @@ class CNNBorderAligner:
         self.initialized = False
         
     def create_border_detection_model(self):
-        """create a lightweight cnn for border detection"""
+        """create an optimized lightweight cnn for alignment features"""
         if not TENSORFLOW_AVAILABLE:
             print("⚠️  TensorFlow not available, skipping cnn border detection model creation.")
             return False
             
         try:
-            # simple u-net style architecture for border detection
+            # optimized architecture for alignment features
             inputs = keras.Input(shape=(None, None, 3))
             
-            # encoder
-            x = layers.Conv2D(32, 3, activation='relu', padding='same')(inputs)
-            x = layers.Conv2D(32, 3, activation='relu', padding='same')(x)
+            # lightweight feature extraction (inspired by photoshop layer blending)
+            x = layers.Conv2D(16, 3, activation='relu', padding='same')(inputs)
+            x = layers.Conv2D(16, 3, activation='relu', padding='same')(x)
             x = layers.MaxPooling2D(2)(x)
             
-            x = layers.Conv2D(64, 3, activation='relu', padding='same')(x)
-            x = layers.Conv2D(64, 3, activation='relu', padding='same')(x)
-            x = layers.MaxPooling2D(2)(x)
-            
-            # decoder
-            x = layers.Conv2DTranspose(64, 3, strides=2, padding='same')(x)
-            x = layers.Conv2D(64, 3, activation='relu', padding='same')(x)
-            
-            x = layers.Conv2DTranspose(32, 3, strides=2, padding='same')(x)
+            # deeper feature detection for structural elements
+            x = layers.Conv2D(32, 3, activation='relu', padding='same')(x)
             x = layers.Conv2D(32, 3, activation='relu', padding='same')(x)
             
-            # output border mask
+            # upsampling back to original resolution
+            x = layers.UpSampling2D(2)(x)
+            x = layers.Conv2D(16, 3, activation='relu', padding='same')(x)
+            
+            # final alignment feature map (like photoshop difference layer)
             outputs = layers.Conv2D(1, 1, activation='sigmoid')(x)
             
             self.border_model = keras.Model(inputs, outputs)
-            print("✅ cnn border detection model created")
+            print("✅ optimized cnn alignment model created")
             return True
             
         except Exception as e:
@@ -816,9 +810,20 @@ class CNNBorderAligner:
     
     def calculate_image_difference(self, img1, img2):
         """calculate difference between two images (like photoshop difference layer)"""
+        # ensure images are same size by cropping to minimum dimensions
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        
+        # crop to minimum size
+        min_h = min(h1, h2)
+        min_w = min(w1, w2)
+        
+        img1_cropped = img1[:min_h, :min_w]
+        img2_cropped = img2[:min_h, :min_w]
+        
         # convert to float for better precision
-        img1_float = img1.astype(np.float32)
-        img2_float = img2.astype(np.float32)
+        img1_float = img1_cropped.astype(np.float32)
+        img2_float = img2_cropped.astype(np.float32)
         
         # calculate absolute difference
         diff = np.abs(img1_float - img2_float)
@@ -828,55 +833,234 @@ class CNNBorderAligner:
         
         return diff_normalized
     
-    def find_optimal_alignment(self, reference_img, target_img, max_shift=50):
-        """find optimal alignment using border detection and image subtraction"""
-        print("🔍 finding optimal alignment using cnn borders...")
+    def find_optimal_alignment(self, reference_img, target_img, max_shift=30, reference_points=None):
+        """find optimal alignment using reference points and cnn features"""
+        print("🔍 finding optimal alignment using reference points and cnn features...")
         
-        # detect borders
-        ref_borders = self.detect_borders(reference_img)
-        target_borders = self.detect_borders(target_img)
-        
-        # calculate border difference
-        border_diff = self.calculate_image_difference(ref_borders, target_borders)
-        
-        # try different shifts and find minimum difference
-        best_shift = (0, 0)
-        min_diff = np.sum(border_diff)
+        # detect alignment features
+        ref_features = self.detect_borders(reference_img)
+        target_features = self.detect_borders(target_img)
         
         h, w = reference_img.shape[:2]
+        best_shift = (0, 0)
+        min_diff = float('inf')
         
-        for dx in range(-max_shift, max_shift + 1, 2):
-            for dy in range(-max_shift, max_shift + 1, 2):
-                # create transformation matrix
-                transform_matrix = np.array([
-                    [1, 0, dx],
-                    [0, 1, dy]
-                ], dtype=np.float32)
-                
-                # apply shift to target
-                shifted_target = cv2.warpAffine(target_img, transform_matrix, (w, h))
-                shifted_borders = cv2.warpAffine(target_borders, transform_matrix, (w, h))
-                
-                # calculate difference
-                diff = self.calculate_image_difference(ref_borders, shifted_borders)
-                total_diff = np.sum(diff)
+        # if reference points are provided, use point-based alignment
+        if reference_points and len(reference_points) >= 2:
+            print(f"🎯 using {len(reference_points)} reference points for alignment")
+            return self._align_using_reference_points(reference_img, target_img, reference_points)
+        
+        # fallback to border-based alignment
+        print("🔄 using border-based alignment (no reference points)")
+        
+        # coarse search first
+        for dx in range(-max_shift, max_shift + 1, 4):
+            for dy in range(-max_shift, max_shift + 1, 4):
+                transform_matrix = np.array([[1, 0, dx], [0, 1, dy]], dtype=np.float32)
+                shifted_features = cv2.warpAffine(target_features, transform_matrix, (w, h))
+                diff = self.calculate_image_difference(ref_features, shifted_features)
+                total_diff = np.mean(diff)
                 
                 if total_diff < min_diff:
                     min_diff = total_diff
                     best_shift = (dx, dy)
         
-        print(f"✅ optimal shift found: {best_shift} (difference: {min_diff})")
+        # fine search around best coarse result
+        coarse_x, coarse_y = best_shift
+        for dx in range(coarse_x - 3, coarse_x + 4):
+            for dy in range(coarse_y - 3, coarse_y + 4):
+                transform_matrix = np.array([[1, 0, dx], [0, 1, dy]], dtype=np.float32)
+                shifted_features = cv2.warpAffine(target_features, transform_matrix, (w, h))
+                diff = self.calculate_image_difference(ref_features, shifted_features)
+                total_diff = np.mean(diff)
+                
+                if total_diff < min_diff:
+                    min_diff = total_diff
+                    best_shift = (dx, dy)
         
-        # create final transformation matrix
-        final_transform = np.array([
-            [1, 0, best_shift[0]],
-            [0, 1, best_shift[1]]
-        ], dtype=np.float32)
+        print(f"✅ optimal shift found: {best_shift} (difference: {min_diff:.2f})")
         
+        final_transform = np.array([[1, 0, best_shift[0]], [0, 1, best_shift[1]]], dtype=np.float32)
         return final_transform
     
-    def align_to_reference_cnn(self, images, reference_index=0):
-        """align all images using cnn border detection"""
+    def _align_using_reference_points(self, reference_img, target_img, reference_points):
+        """align using specific reference points (like photoshop manual alignment)"""
+        print("🎯 performing reference point-based alignment...")
+        
+        # convert reference points to numpy arrays
+        ref_pts = np.array(reference_points, dtype=np.float32).reshape(-1, 1, 2)
+        
+        # find corresponding points in target image using feature matching
+        target_pts = []
+        
+        # convert to grayscale for feature detection
+        gray_ref = cv2.cvtColor(reference_img, cv2.COLOR_RGB2GRAY)
+        gray_target = cv2.cvtColor(target_img, cv2.COLOR_RGB2GRAY)
+        
+        # use SIFT for feature detection
+        sift = cv2.SIFT_create()
+        
+        for ref_pt in ref_pts:
+            x, y = ref_pt[0]
+            
+            # create a larger region around reference point for better matching
+            region_size = 100
+            x1 = max(0, int(x - region_size//2))
+            y1 = max(0, int(y - region_size//2))
+            x2 = min(reference_img.shape[1], int(x + region_size//2))
+            y2 = min(reference_img.shape[0], int(y + region_size//2))
+            
+            # extract region around reference point
+            ref_region = gray_ref[y1:y2, x1:x2]
+            
+            if ref_region.size == 0:
+                print(f"⚠️  reference point {x},{y} outside image bounds")
+                continue
+            
+            # find features in reference region
+            kp_ref, des_ref = sift.detectAndCompute(ref_region, None)
+            
+            if des_ref is None or len(kp_ref) == 0:
+                print(f"⚠️  no features found around reference point {x},{y}")
+                continue
+            
+            # find features in target image
+            kp_target, des_target = sift.detectAndCompute(gray_target, None)
+            
+            if des_target is None or len(kp_target) == 0:
+                print(f"⚠️  no features found in target image")
+                continue
+            
+            # match features
+            bf = cv2.BFMatcher()
+            matches = bf.knnMatch(des_ref, des_target, k=2)
+            
+            # apply ratio test
+            good_matches = []
+            for match_pair in matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.7 * n.distance:
+                        good_matches.append(m)
+            
+            if len(good_matches) > 0:
+                # find best match
+                best_match = min(good_matches, key=lambda x: x.distance)
+                
+                # calculate corresponding point in target image
+                ref_kp = kp_ref[best_match.queryIdx]
+                target_kp = kp_target[best_match.trainIdx]
+                
+                # adjust coordinates for region offset
+                target_x = target_kp.pt[0] + x1
+                target_y = target_kp.pt[1] + y1
+                
+                target_pts.append([target_x, target_y])
+                print(f"✅ matched reference point {x},{y} → {target_x:.1f},{target_y:.1f}")
+            else:
+                print(f"⚠️  no good matches found for reference point {x},{y}")
+        
+        if len(target_pts) < 2:
+            print("⚠️  insufficient matched points for alignment")
+            return np.eye(3)
+        
+        target_pts = np.array(target_pts, dtype=np.float32).reshape(-1, 1, 2)
+        
+        # match the number of reference points to target points
+        matched_ref_pts = ref_pts[:len(target_pts)]
+        
+        print(f"📊 using {len(target_pts)} matched point pairs for transformation")
+        
+        # estimate transformation matrix
+        if len(matched_ref_pts) >= 4 and len(target_pts) >= 4:
+            # use homography for 4+ points (allows rotation/scaling)
+            transform_matrix, _ = cv2.findHomography(target_pts, matched_ref_pts, cv2.RANSAC, 5.0)
+            print("🔄 using homography transformation (rotation + scaling)")
+        elif len(matched_ref_pts) >= 3 and len(target_pts) >= 3:
+            # use affine for 3 points (allows rotation but limited scaling)
+            src_pts = target_pts[:3].reshape(3, 2)
+            dst_pts = matched_ref_pts[:3].reshape(3, 2)
+            transform_matrix = cv2.getAffineTransform(src_pts, dst_pts)
+            print("🔄 using affine transformation (rotation + limited scaling)")
+        elif len(matched_ref_pts) >= 2 and len(target_pts) >= 2:
+            # use estimateAffinePartial2D for 2 points (translation + rotation)
+            transform_matrix = cv2.estimateAffinePartial2D(target_pts, matched_ref_pts)[0]
+            print("🔄 using partial affine transformation (translation + rotation)")
+        else:
+            print("⚠️  insufficient points for any transformation")
+            return np.eye(3)
+        
+        if transform_matrix is None:
+            print("⚠️  failed to estimate transformation, using identity")
+            return np.eye(3)
+        
+        return transform_matrix
+    
+    def validate_alignment_quality(self, reference_img, aligned_img, reference_points=None):
+        """validate alignment quality using multiple metrics"""
+        print("🔍 validating alignment quality...")
+        
+        # calculate structural similarity
+        from skimage.metrics import structural_similarity as ssim
+        gray_ref = cv2.cvtColor(reference_img, cv2.COLOR_RGB2GRAY)
+        gray_aligned = cv2.cvtColor(aligned_img, cv2.COLOR_RGB2GRAY)
+        
+        # ensure same size for comparison
+        h, w = gray_ref.shape[:2]
+        gray_aligned_resized = cv2.resize(gray_aligned, (w, h))
+        
+        ssim_score = ssim(gray_ref, gray_aligned_resized)
+        print(f"📊 structural similarity: {ssim_score:.3f}")
+        
+        # calculate mean squared error
+        mse = np.mean((gray_ref.astype(float) - gray_aligned_resized.astype(float)) ** 2)
+        print(f"📊 mean squared error: {mse:.2f}")
+        
+        # if reference points provided, check point alignment
+        if reference_points:
+            point_errors = []
+            for pt in reference_points:
+                x, y = int(pt[0]), int(pt[1])
+                if 0 <= x < w and 0 <= y < h:
+                    # check if point is well-aligned (low difference in surrounding area)
+                    patch_size = 20
+                    x1 = max(0, x - patch_size//2)
+                    y1 = max(0, y - patch_size//2)
+                    x2 = min(w, x + patch_size//2)
+                    y2 = min(h, y + patch_size//2)
+                    
+                    patch_ref = gray_ref[y1:y2, x1:x2]
+                    patch_aligned = gray_aligned_resized[y1:y2, x1:x2]
+                    
+                    if patch_ref.shape == patch_aligned.shape:
+                        patch_error = np.mean(np.abs(patch_ref.astype(float) - patch_aligned.astype(float)))
+                        point_errors.append(patch_error)
+            
+            if point_errors:
+                avg_point_error = np.mean(point_errors)
+                print(f"📊 average reference point error: {avg_point_error:.2f}")
+                
+                # quality assessment
+                if ssim_score > 0.8 and avg_point_error < 20:
+                    print("✅ excellent alignment quality")
+                    return True
+                elif ssim_score > 0.6 and avg_point_error < 40:
+                    print("✅ good alignment quality")
+                    return True
+                else:
+                    print("⚠️  poor alignment quality - consider manual adjustment")
+                    return False
+        
+        # general quality assessment
+        if ssim_score > 0.7:
+            print("✅ good alignment quality")
+            return True
+        else:
+            print("⚠️  poor alignment quality - consider manual adjustment")
+            return False
+    
+    def align_to_reference_cnn(self, images, reference_index=0, reference_points=None):
+        """align all images using cnn border detection and reference points"""
         if not images or len(images) < 2:
             print("❌ need at least 2 images for alignment")
             return []
@@ -899,17 +1083,34 @@ class CNNBorderAligner:
             
             print(f"\n🔄 cnn-aligning image {i}...")
             
-            # find optimal alignment
-            transform_matrix = self.find_optimal_alignment(reference_img, img)
+            # find optimal alignment with reference points
+            transform_matrix = self.find_optimal_alignment(
+                reference_img, img, reference_points=reference_points
+            )
             
             if transform_matrix is not None:
                 # apply transformation
                 h, w = reference_img.shape[:2]
-                aligned_img = cv2.warpAffine(img, transform_matrix, (w, h))
+                if transform_matrix.shape == (3, 3):
+                    # homography transformation
+                    aligned_img = cv2.warpPerspective(img, transform_matrix, (w, h))
+                else:
+                    # affine transformation
+                    aligned_img = cv2.warpAffine(img, transform_matrix, (w, h))
                 
-                aligned_images.insert(i, aligned_img)
-                transforms.insert(i, transform_matrix)
-                print(f"✅ image {i} cnn-aligned successfully")
+                # validate alignment quality
+                quality_ok = self.validate_alignment_quality(
+                    reference_img, aligned_img, reference_points
+                )
+                
+                if quality_ok:
+                    aligned_images.insert(i, aligned_img)
+                    transforms.insert(i, transform_matrix)
+                    print(f"✅ image {i} cnn-aligned successfully with good quality")
+                else:
+                    print(f"⚠️  image {i} alignment quality poor, using original")
+                    aligned_images.insert(i, img.copy())
+                    transforms.insert(i, np.eye(3))
             else:
                 print(f"❌ failed to cnn-align image {i}, using original")
                 aligned_images.insert(i, img.copy())
@@ -1076,7 +1277,7 @@ def add_methods_to_processor(processor):
         return False
     
     def align_images_cnn(self, reference_index=0):
-        """align all loaded images using cnn border detection"""
+        """align all loaded images using cnn border detection and reference points"""
         if not self.images:
             print("❌ no images loaded")
             return False
@@ -1085,6 +1286,8 @@ def add_methods_to_processor(processor):
         
         # apply crop if selected
         images_to_align = self.images
+        reference_points = None
+        
         if self.crop_box:
             x1, y1, x2, y2 = self.crop_box
             
@@ -1105,6 +1308,17 @@ def add_methods_to_processor(processor):
                 images_to_align = [img[y1:y2, x1:x2] for img in self.images]
                 print(f"🔄 applying crop ({x1},{y1}) to ({x2},{y2}) = {width}x{height} pixels")
                 
+                # adjust reference points for crop
+                if hasattr(self, 'reference_points') and self.reference_points:
+                    reference_points = []
+                    for pt in self.reference_points:
+                        # adjust point coordinates for crop
+                        adj_x = pt[0] - x1
+                        adj_y = pt[1] - y1
+                        if 0 <= adj_x < width and 0 <= adj_y < height:
+                            reference_points.append((adj_x, adj_y))
+                    print(f"🎯 adjusted {len(reference_points)} reference points for crop")
+                
                 # check that cropped images are valid
                 for i, img in enumerate(images_to_align):
                     if img.size == 0:
@@ -1115,9 +1329,14 @@ def add_methods_to_processor(processor):
             except Exception as e:
                 print(f"❌ error applying crop: {e}")
                 return False
+        else:
+            # use original reference points if no crop
+            if hasattr(self, 'reference_points') and self.reference_points:
+                reference_points = self.reference_points
+                print(f"🎯 using {len(reference_points)} reference points for alignment")
         
         aligned_imgs, transforms = cnn_aligner.align_to_reference_cnn(
-            images_to_align, reference_index
+            images_to_align, reference_index, reference_points
         )
         
         if aligned_imgs:
@@ -1335,35 +1554,26 @@ def add_methods_to_processor(processor):
     processor.create_nimslo_gif = create_nimslo_gif.__get__(processor, NimsloProcessor)
     processor.create_comparison_gif = create_comparison_gif.__get__(processor, NimsloProcessor)
     processor.set_output_folder = set_output_folder.__get__(processor, NimsloProcessor)
-    processor.preview_alignment = preview_alignment.__get__(processor, NimsloProcessor)
-    processor.preview_final = preview_final.__get__(processor, NimsloProcessor)
     processor.crop_to_valid_area = crop_to_valid_area.__get__(processor, NimsloProcessor)
     processor.apply_quality_settings = apply_quality_settings.__get__(processor, NimsloProcessor)
 
-def main():
-    """main function to run the nimslo processor"""
-    print("🎬 nimslo auto-aligning gif processor")
-    print("=" * 50)
-    
-    # create processor
-    processor = NimsloProcessor()
-    add_methods_to_processor(processor)
+def process_single_batch(processor, batch_name="batch"):
+    """process a single batch of images"""
+    print(f"\n🎬 processing {batch_name}...")
+    print("=" * 40)
     
     # load images
-    print("\n📁 loading images...")
+    print("📁 loading images...")
     if not processor.load_images():
         print("❌ failed to load images")
-        return
-    
-    # show preview
-    processor.show_images(save_path="preview_original.png")
+        return False
     
     # interactive crop selection
-    print("\n🎯 crop selection (close window when done)...")
+    print("🎯 crop selection (close window when done)...")
     processor.select_crop_and_reference()
     
     # align images
-    print("\n🧩 aligning images...")
+    print("🧩 aligning images...")
     
     # force cnn alignment (no user choice)
     use_cnn = True
@@ -1378,20 +1588,12 @@ def main():
             print("🧠 using cnn border detection alignment...")
             if not processor.align_images_cnn(reference_index=reference_index):
                 print("❌ cnn alignment failed")
-                return
+                return False
         else:
             print("🔍 using traditional feature-based alignment...")
             if not processor.align_images(reference_index=reference_index, transform_type='homography'):
                 print("❌ alignment failed")
-                return
-        
-        # show aligned preview
-        processor.preview_alignment("aligned images")
-        
-        # auto-continue (no user confirmation)
-        print(f"\n🎯 alignment preview (cnn border detection):")
-        print("   - check preview_aligned.png to see alignment results")
-        print("   - continuing automatically...")
+                return False
         
         # crop to valid area to remove black bars
         processor.aligned_images = processor.crop_to_valid_area(processor.aligned_images)
@@ -1406,41 +1608,76 @@ def main():
             print("✅ alignment complete, proceeding to histogram matching")
     
     # match histograms
-    print("\n🌈 matching histograms...")
+    print("🌈 matching histograms...")
     if not processor.match_histograms(method='adaptive', strength=0.7):
         print("❌ histogram matching failed")
-        return
-    
-    # show final preview
-    processor.preview_final("final processed images")
-    
-    # auto-continue (no user confirmation)
-    print("\n🎬 final preview:")
-    print("   - check preview_final.png to see final result")
-    print("   - proceeding to quality processing and gif creation...")
+        return False
     
     # apply quality settings
-    print("\n🎨 applying quality settings...")
+    print("🎨 applying quality settings...")
     quality = 'high'  # default to high quality
     processor.matched_images = processor.apply_quality_settings(processor.matched_images, quality=quality)
     
     # create final gif with quality settings
-    print(f"\n🎬 creating final {quality} quality gif...")
+    print(f"🎬 creating final {quality} quality gif...")
     if processor.create_nimslo_gif(duration=0.15, bounce=True, quality=quality):
         print("🎉 nimslo gif created successfully!")
+        return True
     else:
         print("❌ gif creation failed")
+        return False
+
+def main():
+    """main function to run the nimslo processor with batch support"""
+    print("🎬 nimslo auto-aligning gif processor")
+    print("🚀 streamlined batch processing mode")
+    print("=" * 50)
     
-    # cleanup preview images
-    print("\n🧹 cleaning up preview images...")
-    import os
-    preview_files = ["preview_original.png", "preview_aligned.png", "preview_final.png"]
-    for file in preview_files:
-        if os.path.exists(file):
-            os.remove(file)
-            print(f"   ✅ removed {file}")
+    # create processor
+    processor = NimsloProcessor()
+    add_methods_to_processor(processor)
     
-    print("\n✅ processing complete!")
+    # batch processing loop
+    batch_count = 0
+    while True:
+        batch_count += 1
+        print(f"\n📦 batch {batch_count}")
+        print("-" * 30)
+        
+        # process this batch
+        success = process_single_batch(processor, f"batch {batch_count}")
+        
+        if not success:
+            print("❌ batch processing failed")
+            break
+        
+        # ask if user wants to process another batch
+        print(f"\n✅ batch {batch_count} completed successfully!")
+        
+        # simple yes/no dialog with proper cleanup
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            continue_processing = messagebox.askyesno(
+                "continue processing", 
+                f"batch {batch_count} completed! process another batch?"
+            )
+            root.destroy()
+        except Exception as e:
+            print(f"⚠️  dialog error: {e}")
+            continue_processing = False
+        
+        if not continue_processing:
+            break
+        
+        # reset processor for next batch
+        processor.reset()
+        
+        # small delay to ensure cleanup
+        import time
+        time.sleep(0.5)
+    
+    print(f"\n🎉 processing complete! processed {batch_count} batch(es)")
 
 if __name__ == "__main__":
     main() 
