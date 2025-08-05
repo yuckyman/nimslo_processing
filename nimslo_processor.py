@@ -386,9 +386,25 @@ class NimsloProcessor:
         console.print("  • [cyan]1-4[/cyan] - select range (images 1 through 4)")
         console.print("  • [cyan]1,3-6,8[/cyan] - mixed selection")
         console.print("  • [cyan]all[/cyan] - select all images")
+        console.print("  • [cyan]preview N[/cyan] - preview image N before selecting")
         
-        # get selection
-        selection = Prompt.ask("\n📸 [bold]Enter your selection[/bold]", default="1-4")
+        # get selection with preview option
+        while True:
+            selection = Prompt.ask("\n📸 [bold]Enter your selection[/bold] (or 'preview N' to see image)", default="1-4")
+            
+            # check for preview command
+            if selection.lower().startswith('preview '):
+                try:
+                    preview_num = int(selection.split()[1])
+                    if 1 <= preview_num <= len(image_files):
+                        self._preview_image(image_files[preview_num - 1], preview_num, console)
+                    else:
+                        console.print(f"[red]❌ invalid image number: {preview_num}[/red]")
+                except (ValueError, IndexError):
+                    console.print("[red]❌ invalid preview command. use: preview N[/red]")
+                continue
+            else:
+                break
         
         # parse selection
         try:
@@ -443,9 +459,25 @@ class NimsloProcessor:
         print("  • 1,3,5,7 - specific images")
         print("  • 1-4 - range selection")
         print("  • 1,3-6,8 - mixed selection")
+        print("  • preview N - preview image N before selecting")
         
-        # get selection
-        selection = input("\n📸 enter your selection: ").strip()
+        # get selection with preview option
+        while True:
+            selection = input("\n📸 enter your selection (or 'preview N' to see image): ").strip()
+            
+            # check for preview command
+            if selection.lower().startswith('preview '):
+                try:
+                    preview_num = int(selection.split()[1])
+                    if 1 <= preview_num <= len(image_files):
+                        self._preview_image_basic(image_files[preview_num - 1], preview_num)
+                    else:
+                        print(f"❌ invalid image number: {preview_num}")
+                except (ValueError, IndexError):
+                    print("❌ invalid preview command. use: preview N")
+                continue
+            else:
+                break
         
         try:
             selected_indices = self._parse_selection(selection, len(image_files))
@@ -508,6 +540,76 @@ class NimsloProcessor:
         
         # remove duplicates and sort
         return sorted(list(set(indices)))
+    
+    def _preview_image(self, image_path, image_num, console):
+        """preview a single image using matplotlib"""
+        try:
+            console.print(f"\n[cyan]📖 loading image {image_num} for preview...[/cyan]")
+            
+            # load image
+            img = cv2.imread(image_path)
+            if img is None:
+                console.print(f"[red]❌ failed to load image: {image_path}[/red]")
+                return
+            
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # create preview window
+            plt.figure(figsize=(10, 8))
+            plt.imshow(img_rgb)
+            plt.title(f"Image {image_num}: {os.path.basename(image_path)}")
+            plt.axis('off')
+            
+            # add image info as text
+            height, width = img_rgb.shape[:2]
+            file_size = os.path.getsize(image_path) / (1024 * 1024)
+            info_text = f"Size: {width}x{height} | File: {file_size:.1f}MB"
+            plt.figtext(0.5, 0.02, info_text, ha='center', fontsize=10, 
+                       bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+            
+            console.print(f"[green]✅ showing preview of image {image_num}[/green]")
+            console.print("[dim]close the preview window to continue...[/dim]")
+            
+            plt.tight_layout()
+            plt.show()
+            
+        except Exception as e:
+            console.print(f"[red]❌ preview error: {e}[/red]")
+    
+    def _preview_image_basic(self, image_path, image_num):
+        """preview a single image using matplotlib (basic version)"""
+        try:
+            print(f"\n📖 loading image {image_num} for preview...")
+            
+            # load image
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"❌ failed to load image: {image_path}")
+                return
+            
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # create preview window
+            plt.figure(figsize=(10, 8))
+            plt.imshow(img_rgb)
+            plt.title(f"Image {image_num}: {os.path.basename(image_path)}")
+            plt.axis('off')
+            
+            # add image info as text
+            height, width = img_rgb.shape[:2]
+            file_size = os.path.getsize(image_path) / (1024 * 1024)
+            info_text = f"Size: {width}x{height} | File: {file_size:.1f}MB"
+            plt.figtext(0.5, 0.02, info_text, ha='center', fontsize=10, 
+                       bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+            
+            print(f"✅ showing preview of image {image_num}")
+            print("close the preview window to continue...")
+            
+            plt.tight_layout()
+            plt.show()
+            
+        except Exception as e:
+            print(f"❌ preview error: {e}")
 
     def preview_alignment(self, title="alignment preview"):
         """preview aligned images in a grid"""
@@ -2627,18 +2729,19 @@ def main():
         # ask if user wants to process another batch
         print(f"\n✅ batch {batch_count} completed successfully!")
         
-        # simple yes/no dialog with proper cleanup
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            continue_processing = messagebox.askyesno(
-                "continue processing", 
-                f"batch {batch_count} completed! process another batch?"
-            )
-            root.destroy()
-        except Exception as e:
-            print(f"⚠️  dialog error: {e}")
-            continue_processing = False
+        # terminal-based continue prompt
+        if RICH_AVAILABLE:
+            console = Console()
+            console.print(f"\n[bold green]✅ batch {batch_count} completed successfully![/bold green]")
+            continue_processing = Prompt.ask(
+                f"[bold]process another batch?[/bold] (y/n)", 
+                choices=["y", "n", "yes", "no"], 
+                default="y"
+            ).lower() in ["y", "yes"]
+        else:
+            print(f"\n✅ batch {batch_count} completed successfully!")
+            response = input("process another batch? (y/n): ").strip().lower()
+            continue_processing = response in ["y", "yes"]
         
         if not continue_processing:
             break
