@@ -32,6 +32,6 @@ if [ ! -f "nimslo_processor.py" ]; then
 fi
 
 echo "🎯 running nimslo processor..."
-python nimslo_processor.py
+python nimslo_processor.py "$@"
 
 echo "✅ done!" 

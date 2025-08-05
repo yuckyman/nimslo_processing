@@ -19,6 +19,12 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
+# parallel processing imports
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import time
+from functools import partial
+
 # for gif creation
 from PIL import Image as PILImage
 import imageio
@@ -57,6 +63,8 @@ class NimsloProcessor:
         self.matched_images = []
         self.crop_box = None
         self.all_image_files = []  # store all found images
+        self.shots = []  # store detected shots with their reference points
+        self.shot_boundaries = []  # indices where shots change
         
     def reset(self):
         """reset processor state for next batch"""
@@ -67,10 +75,215 @@ class NimsloProcessor:
         self.matched_images = []
         self.crop_box = None
         self.all_image_files = []
+        self.shots = []
+        self.shot_boundaries = []
         
-        # force garbage collection to clean up tkinter resources
-        import gc
-        gc.collect()
+        # ULTRA AGGRESSIVE tkinter cleanup to prevent segfaults
+        try:
+            import tkinter as tk
+            import gc
+            import sys
+            import os
+            
+            print("🧹 performing ultra-aggressive tkinter cleanup...")
+            
+            # step 1: force quit all active tkinter instances
+            if hasattr(tk, '_default_root') and tk._default_root:
+                try:
+                    tk._default_root.quit()
+                    tk._default_root.destroy()
+                except:
+                    pass
+                finally:
+                    tk._default_root = None
+            
+            # step 2: clear all tkinter modules from memory
+            tkinter_modules = [mod for mod in sys.modules.keys() if 'tkinter' in mod.lower() or 'tk' in mod.lower()]
+            for mod in tkinter_modules:
+                if mod in sys.modules:
+                    try:
+                        del sys.modules[mod]
+                    except:
+                        pass
+            
+            # step 3: clear matplotlib completely
+            try:
+                import matplotlib
+                matplotlib.pyplot.close('all')
+                matplotlib.pyplot.ioff()
+                # clear matplotlib backends
+                if hasattr(matplotlib, 'backends'):
+                    matplotlib.use('Agg')  # switch to non-interactive backend
+            except:
+                pass
+            
+            # step 4: aggressive garbage collection
+            for _ in range(3):  # multiple gc passes
+                gc.collect()
+            
+            # step 5: force python to release memory
+            try:
+                import ctypes
+                ctypes.CDLL("libc.dylib").malloc_trim(0)  # macos memory trim
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"⚠️  cleanup error: {e}")
+        
+        print("🔄 processor state reset, waiting for cleanup...")
+    
+    def detect_shots(self, similarity_threshold=0.7):
+        """detect different shots in the image sequence using histogram comparison"""
+        if len(self.images) <= 4:
+            # single shot for 4 or fewer images
+            self.shots = [{'indices': list(range(len(self.images))), 'reference_points': self.reference_points}]
+            self.shot_boundaries = [0, len(self.images)]
+            print(f"📸 single shot detected with {len(self.images)} images")
+            return
+        
+        print(f"📸 detecting shots in {len(self.images)} images...")
+        
+        # calculate histograms for all images
+        histograms = []
+        for i, img in enumerate(self.images):
+            # convert to grayscale and calculate histogram
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+            histograms.append(hist)
+        
+        # find shot boundaries by comparing consecutive histograms
+        shot_boundaries = [0]  # first image always starts a shot
+        
+        for i in range(1, len(histograms)):
+            # calculate correlation between consecutive histograms
+            correlation = cv2.compareHist(histograms[i-1], histograms[i], cv2.HISTCMP_CORREL)
+            
+            if correlation < similarity_threshold:
+                print(f"📸 shot boundary detected at image {i} (correlation: {correlation:.3f})")
+                shot_boundaries.append(i)
+        
+        shot_boundaries.append(len(self.images))  # last boundary
+        self.shot_boundaries = shot_boundaries
+        
+        # group images into shots
+        self.shots = []
+        for i in range(len(shot_boundaries) - 1):
+            start_idx = shot_boundaries[i]
+            end_idx = shot_boundaries[i + 1]
+            shot_indices = list(range(start_idx, end_idx))
+            
+            # auto-detect reference points for this shot
+            shot_ref_points = self.auto_detect_reference_points(shot_indices)
+            
+            self.shots.append({
+                'indices': shot_indices,
+                'reference_points': shot_ref_points,
+                'shot_number': i + 1
+            })
+            
+            print(f"📸 shot {i+1}: images {start_idx}-{end_idx-1} ({len(shot_indices)} frames) with {len(shot_ref_points)} ref points")
+        
+        print(f"✅ detected {len(self.shots)} shot(s) total")
+    
+    def auto_detect_reference_points(self, shot_indices, max_points=4):
+        """automatically detect good reference points for a shot using corner detection"""
+        if not shot_indices:
+            return []
+        
+        # use the first image of the shot as reference
+        ref_img = self.images[shot_indices[0]]
+        
+        # convert to grayscale
+        gray = cv2.cvtColor(ref_img, cv2.COLOR_RGB2GRAY)
+        
+        # detect corners using Shi-Tomasi corner detector
+        corners = cv2.goodFeaturesToTrack(
+            gray,
+            maxCorners=max_points * 3,  # detect more than needed
+            qualityLevel=0.01,
+            minDistance=100,  # minimum distance between corners
+            blockSize=7
+        )
+        
+        if corners is None or len(corners) == 0:
+            print(f"⚠️  no good corners found for shot, trying harris corners...")
+            
+            # fallback to harris corners
+            dst = cv2.cornerHarris(gray, 2, 3, 0.04)
+            dst = cv2.dilate(dst, None)
+            
+            # threshold for corner detection
+            ret, dst = cv2.threshold(dst, 0.01 * dst.max(), 255, 0)
+            dst = np.uint8(dst)
+            
+            # find centroids
+            ret, labels, stats, centroids = cv2.connectedComponentsWithStats(dst)
+            
+            if len(centroids) > 1:
+                # convert centroids to corner format
+                corners = centroids[1:].reshape(-1, 1, 2).astype(np.float32)
+            else:
+                # last resort: use image center points
+                h, w = gray.shape
+                corners = np.array([
+                    [[w//4, h//4]],
+                    [[3*w//4, h//4]], 
+                    [[w//4, 3*h//4]],
+                    [[3*w//4, 3*h//4]]
+                ], dtype=np.float32)
+                print("⚠️  using fallback grid points as reference")
+        
+        # select best corners (well distributed)
+        if len(corners) > max_points:
+            # select corners that are well distributed across the image
+            selected_corners = self.select_distributed_points(corners, max_points, gray.shape)
+        else:
+            selected_corners = corners
+        
+        # convert to the format expected by the rest of the system
+        ref_points = []
+        for corner in selected_corners:
+            x, y = corner[0]
+            ref_points.append((float(x), float(y)))
+        
+        print(f"🎯 auto-detected {len(ref_points)} reference points for shot")
+        return ref_points
+    
+    def select_distributed_points(self, corners, max_points, image_shape):
+        """select points that are well distributed across the image"""
+        h, w = image_shape
+        
+        # divide image into quadrants and select best point from each
+        quadrants = [
+            (0, w//2, 0, h//2),      # top-left
+            (w//2, w, 0, h//2),      # top-right  
+            (0, w//2, h//2, h),      # bottom-left
+            (w//2, w, h//2, h)       # bottom-right
+        ]
+        
+        selected = []
+        for x1, x2, y1, y2 in quadrants:
+            # find corners in this quadrant
+            quadrant_corners = []
+            for corner in corners:
+                x, y = corner[0]
+                if x1 <= x < x2 and y1 <= y < y2:
+                    quadrant_corners.append(corner)
+            
+            if quadrant_corners:
+                # select the corner closest to quadrant center
+                center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+                best_corner = min(quadrant_corners, 
+                                key=lambda c: (c[0][0] - center_x)**2 + (c[0][1] - center_y)**2)
+                selected.append(best_corner)
+        
+        # if we need more points and have extras, add them
+        remaining_corners = [c for c in corners if not any(np.array_equal(c, s) for s in selected)]
+        while len(selected) < max_points and remaining_corners:
+            selected.append(remaining_corners.pop(0))
+        
+        return selected[:max_points]
         
     def load_images(self, folder_path=None):
         """load images from folder or file dialog"""
@@ -111,11 +324,16 @@ class NimsloProcessor:
     def select_images_manually(self, image_files):
         """manual image selection interface"""
         print("🎯 opening image selector...")
+        print("💡 tip: select 3+ images (3=bounce, 4=standard, 5+=continuous)")
         
-        # create selection window
-        root = tk.Tk()
-        root.title("select nimslo images")
-        root.geometry("1200x800")
+        # create selection window with error handling
+        try:
+            root = tk.Tk()
+            root.title("select nimslo images")
+            root.geometry("1200x800")
+        except Exception as e:
+            print(f"❌ failed to create selection window: {e}")
+            return []
         
         # create main frame
         main_frame = ttk.Frame(root)
@@ -439,8 +657,472 @@ class NimsloProcessor:
         # add a small delay to ensure window appears
         import time
         time.sleep(0.5)
+    
+    def align_single_shot_parallel(self, shot_data):
+        """align a single shot - designed for parallel execution"""
+        shot_num, shot_indices, shot_ref_points, shot_images, crop_box = shot_data
+        
+        print(f"\n📸 [parallel] aligning shot {shot_num} (images {shot_indices[0]}-{shot_indices[-1]})...")
+        
+        try:
+            # use CNN aligner with shot-specific reference points
+            cnn_aligner = CNNBorderAligner()
+            
+            # apply crop to shot images if crop_box is set
+            if crop_box:
+                print(f"🔄 [shot {shot_num}] applying crop...")
+                cropped_shot_images = []
+                adjusted_ref_points = []
+                
+                x1, y1, x2, y2 = crop_box
+                for img in shot_images:
+                    cropped_img = img[y1:y2, x1:x2]
+                    cropped_shot_images.append(cropped_img)
+                
+                # adjust reference points for crop
+                for ref_x, ref_y in shot_ref_points:
+                    adj_x = ref_x - x1
+                    adj_y = ref_y - y1
+                    adjusted_ref_points.append((adj_x, adj_y))
+                
+                shot_images = cropped_shot_images
+                shot_ref_points = adjusted_ref_points
+                print(f"🎯 [shot {shot_num}] adjusted {len(shot_ref_points)} reference points for crop")
+            
+            # align images within this shot
+            aligned_shot_images, transforms = cnn_aligner.align_to_reference_cnn(
+                shot_images, 
+                reference_index=0,  # use first image of shot as reference
+                reference_points=shot_ref_points
+            )
+            
+            if aligned_shot_images:
+                print(f"✅ [shot {shot_num}] aligned successfully ({len(aligned_shot_images)} images)")
+                return shot_num, aligned_shot_images, True
+            else:
+                print(f"⚠️  [shot {shot_num}] alignment failed, using originals")
+                return shot_num, shot_images, False
+                
+        except Exception as e:
+            print(f"❌ [shot {shot_num}] alignment error: {e}")
+            return shot_num, shot_images, False
+    
+    def align_multi_shot_images(self, use_parallel=True):
+        """align images for multiple shots using shot-specific reference points"""
+        if not self.shots:
+            print("❌ no shots detected - run detect_shots() first")
+            return False
+        
+        if use_parallel and len(self.shots) > 1:
+            print(f"🚀 parallel aligning {len(self.shots)} shot(s) with shot-specific reference points...")
+            return self._align_shots_parallel()
+        else:
+            print(f"🧩 sequential aligning {len(self.shots)} shot(s) with shot-specific reference points...")
+            return self._align_shots_sequential()
+    
+    def _align_shots_parallel(self):
+        """align shots in parallel using multiprocessing"""
+        try:
+            # prepare shot data for parallel processing
+            shot_data_list = []
+            for shot in self.shots:
+                shot_num = shot['shot_number']
+                shot_indices = shot['indices']
+                shot_ref_points = shot['reference_points']
+                shot_images = [self.images[i] for i in shot_indices]
+                
+                shot_data = (shot_num, shot_indices, shot_ref_points, shot_images, self.crop_box)
+                shot_data_list.append(shot_data)
+            
+            # determine optimal number of processes
+            max_workers = min(len(self.shots), mp.cpu_count())
+            print(f"🔥 using {max_workers} parallel workers for {len(self.shots)} shots")
+            
+            # process shots in parallel
+            results = []
+            start_time = time.time()
+            
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # submit all shot alignment tasks
+                future_to_shot = {
+                    executor.submit(align_shot_worker, shot_data): shot_data[0] 
+                    for shot_data in shot_data_list
+                }
+                
+                # collect results as they complete
+                for future in as_completed(future_to_shot):
+                    shot_num = future_to_shot[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        print(f"📦 [shot {shot_num}] completed")
+                    except Exception as e:
+                        print(f"❌ [shot {shot_num}] failed: {e}")
+                        # create fallback result
+                        shot_data = next(sd for sd in shot_data_list if sd[0] == shot_num)
+                        results.append((shot_num, shot_data[3], False))
+            
+            elapsed = time.time() - start_time
+            print(f"⚡ parallel alignment completed in {elapsed:.2f}s")
+            
+            # reassemble results in correct order
+            results.sort(key=lambda x: x[0])  # sort by shot number
+            all_aligned_images = []
+            
+            for shot_num, aligned_images, success in results:
+                all_aligned_images.extend(aligned_images)
+                status = "✅ success" if success else "⚠️  fallback"
+                print(f"📸 shot {shot_num}: {len(aligned_images)} images ({status})")
+            
+            if all_aligned_images:
+                self.aligned_images = all_aligned_images
+                print(f"🚀 parallel multi-shot alignment complete! {len(all_aligned_images)} total images")
+                return True
+            else:
+                print("❌ parallel multi-shot alignment failed")
+                return False
+                
+        except Exception as e:
+            print(f"❌ parallel alignment error: {e}")
+            print("🔄 falling back to sequential alignment...")
+            return self._align_shots_sequential()
+    
+    def _align_shots_sequential(self):
+        """align shots sequentially (original method)"""
+        all_aligned_images = []
+        
+        for shot in self.shots:
+            shot_num = shot['shot_number']
+            shot_indices = shot['indices']
+            shot_ref_points = shot['reference_points']
+            
+            print(f"\n📸 aligning shot {shot_num} (images {shot_indices[0]}-{shot_indices[-1]})...")
+            
+            # extract images for this shot
+            shot_images = [self.images[i] for i in shot_indices]
+            
+            # use CNN aligner with shot-specific reference points
+            cnn_aligner = CNNBorderAligner()
+            
+            # apply crop to shot images if crop_box is set
+            if self.crop_box:
+                print(f"🔄 applying crop to shot {shot_num}...")
+                cropped_shot_images = []
+                adjusted_ref_points = []
+                
+                x1, y1, x2, y2 = self.crop_box
+                for img in shot_images:
+                    cropped_img = img[y1:y2, x1:x2]
+                    cropped_shot_images.append(cropped_img)
+                
+                # adjust reference points for crop
+                for ref_x, ref_y in shot_ref_points:
+                    adj_x = ref_x - x1
+                    adj_y = ref_y - y1
+                    adjusted_ref_points.append((adj_x, adj_y))
+                
+                shot_images = cropped_shot_images
+                shot_ref_points = adjusted_ref_points
+                print(f"🎯 adjusted {len(shot_ref_points)} reference points for crop")
+            
+            # align images within this shot
+            aligned_shot_images, transforms = cnn_aligner.align_to_reference_cnn(
+                shot_images, 
+                reference_index=0,  # use first image of shot as reference
+                reference_points=shot_ref_points
+            )
+            
+            if aligned_shot_images:
+                all_aligned_images.extend(aligned_shot_images)
+                print(f"✅ shot {shot_num} aligned successfully ({len(aligned_shot_images)} images)")
+            else:
+                print(f"⚠️  shot {shot_num} alignment failed, using originals")
+                all_aligned_images.extend(shot_images)
+        
+        if all_aligned_images:
+            self.aligned_images = all_aligned_images
+            print(f"✅ sequential multi-shot alignment complete! {len(all_aligned_images)} total images")
+            return True
+        else:
+            print("❌ sequential multi-shot alignment failed")
+            return False
+    
+    def match_histograms_multi_shot(self, method='adaptive', strength=0.7, use_parallel=True):
+        """match histograms within each shot independently"""
+        if not self.aligned_images:
+            print("❌ no aligned images available - run alignment first")
+            return False
+        
+        if not self.shots:
+            print("⚠️  no shot information available, using standard histogram matching")
+            return self.match_histograms(method=method, strength=strength)
+        
+        if use_parallel and len(self.shots) > 1:
+            print(f"🚀 parallel histogram matching within {len(self.shots)} shot(s) using {method} method...")
+            return self._match_histograms_parallel(method, strength)
+        else:
+            print(f"🌈 sequential histogram matching within {len(self.shots)} shot(s) using {method} method...")
+            return self._match_histograms_sequential(method, strength)
+    
+    def _match_histograms_parallel(self, method, strength):
+        """match histograms in parallel using threading (lighter than multiprocessing)"""
+        try:
+            matched_images = []
+            
+            # prepare shot histogram data for parallel processing
+            shot_histogram_tasks = []
+            for shot in self.shots:
+                shot_num = shot['shot_number']
+                shot_indices = shot['indices']
+                
+                # extract aligned images for this shot
+                shot_start_in_aligned = sum(len(self.shots[i]['indices']) for i in range(shot_num - 1))
+                shot_end_in_aligned = shot_start_in_aligned + len(shot_indices)
+                shot_aligned_images = self.aligned_images[shot_start_in_aligned:shot_end_in_aligned]
+                
+                if shot_aligned_images:
+                    shot_histogram_tasks.append((shot_num, shot_indices, shot_aligned_images, method, strength))
+            
+            # process histogram matching in parallel using threads
+            max_workers = min(len(shot_histogram_tasks), 4)  # limit threads for memory
+            print(f"🔥 using {max_workers} parallel threads for histogram matching")
+            
+            results = []
+            start_time = time.time()
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # submit all histogram matching tasks
+                future_to_shot = {
+                    executor.submit(match_histogram_worker, task): task[0]
+                    for task in shot_histogram_tasks
+                }
+                
+                # collect results
+                for future in as_completed(future_to_shot):
+                    shot_num = future_to_shot[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        print(f"📦 [shot {shot_num}] histogram matching completed")
+                    except Exception as e:
+                        print(f"❌ [shot {shot_num}] histogram matching failed: {e}")
+            
+            elapsed = time.time() - start_time
+            print(f"⚡ parallel histogram matching completed in {elapsed:.2f}s")
+            
+            # reassemble results in correct order
+            results.sort(key=lambda x: x[0])  # sort by shot number
+            for shot_num, shot_matched_images in results:
+                matched_images.extend(shot_matched_images)
+                print(f"📸 shot {shot_num}: {len(shot_matched_images)} images histogram matched")
+            
+            if matched_images:
+                self.matched_images = matched_images
+                print(f"🚀 parallel multi-shot histogram matching complete! {len(matched_images)} total images")
+                return True
+            else:
+                print("❌ parallel multi-shot histogram matching failed")
+                return False
+                
+        except Exception as e:
+            print(f"❌ parallel histogram matching error: {e}")
+            print("🔄 falling back to sequential histogram matching...")
+            return self._match_histograms_sequential(method, strength)
+    
+    def _match_histograms_sequential(self, method, strength):
+        """match histograms sequentially (original method)"""
+        matched_images = []
+        
+        for shot in self.shots:
+            shot_num = shot['shot_number']
+            shot_indices = shot['indices']
+            
+            print(f"\n📸 histogram matching shot {shot_num} (images {shot_indices[0]}-{shot_indices[-1]})...")
+            
+            # extract aligned images for this shot
+            shot_start_in_aligned = sum(len(self.shots[i]['indices']) for i in range(shot_num - 1))
+            shot_end_in_aligned = shot_start_in_aligned + len(shot_indices)
+            
+            shot_aligned_images = self.aligned_images[shot_start_in_aligned:shot_end_in_aligned]
+            
+            if not shot_aligned_images:
+                print(f"⚠️  no aligned images for shot {shot_num}, skipping")
+                continue
+            
+            # use first image of shot as reference for histogram matching
+            reference_img = shot_aligned_images[0]
+            shot_matched = []
+            
+            for i, img in enumerate(shot_aligned_images):
+                if i == 0:
+                    # reference image stays unchanged
+                    shot_matched.append(img)
+                    print(f"📊 shot {shot_num}, image {i}: reference (unchanged)")
+                else:
+                    # match to shot reference
+                    if method == 'adaptive':
+                        matcher = HistogramMatcher(0)  # reference index 0 within shot
+                        matched_img = matcher.adaptive_histogram_match(img, reference_img, strength)
+                    else:
+                        # basic histogram matching fallback
+                        matched_img = self.basic_histogram_match(img, reference_img)
+                    
+                    shot_matched.append(matched_img)
+                    print(f"📊 shot {shot_num}, image {i}: histogram matched (strength={strength})")
+            
+            matched_images.extend(shot_matched)
+            print(f"✅ shot {shot_num} histogram matching complete ({len(shot_matched)} images)")
+        
+        if matched_images:
+            self.matched_images = matched_images
+            print(f"✅ sequential multi-shot histogram matching complete! {len(matched_images)} total images")
+            return True
+        else:
+            print("❌ sequential multi-shot histogram matching failed")
+            return False
+    
+    def basic_histogram_match(self, source, reference):
+        """basic histogram matching as fallback"""
+        # convert to LAB color space for better color preservation
+        source_lab = cv2.cvtColor(source, cv2.COLOR_RGB2LAB)
+        reference_lab = cv2.cvtColor(reference, cv2.COLOR_RGB2LAB)
+        
+        # match each channel separately
+        matched_lab = np.zeros_like(source_lab)
+        
+        for i in range(3):
+            source_channel = source_lab[:, :, i]
+            reference_channel = reference_lab[:, :, i]
+            
+            # calculate CDFs
+            source_hist, bins = np.histogram(source_channel.flatten(), 256, [0, 256])
+            reference_hist, _ = np.histogram(reference_channel.flatten(), 256, [0, 256])
+            
+            source_cdf = source_hist.cumsum()
+            reference_cdf = reference_hist.cumsum()
+            
+            # normalize CDFs
+            source_cdf = source_cdf / source_cdf[-1]
+            reference_cdf = reference_cdf / reference_cdf[-1]
+            
+            # create lookup table
+            lookup_table = np.interp(source_cdf, reference_cdf, np.arange(256))
+            
+            # apply lookup table
+            matched_lab[:, :, i] = lookup_table[source_channel]
+        
+        # convert back to RGB
+        matched_rgb = cv2.cvtColor(matched_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+        return matched_rgb
 
 # preview functions removed for streamlined processing
+
+def align_shot_worker(shot_data):
+    """worker function for parallel shot alignment"""
+    shot_num, shot_indices, shot_ref_points, shot_images, crop_box = shot_data
+    
+    try:
+        # use CNN aligner with shot-specific reference points
+        cnn_aligner = CNNBorderAligner()
+        
+        # apply crop to shot images if crop_box is set
+        if crop_box:
+            cropped_shot_images = []
+            adjusted_ref_points = []
+            
+            x1, y1, x2, y2 = crop_box
+            for img in shot_images:
+                cropped_img = img[y1:y2, x1:x2]
+                cropped_shot_images.append(cropped_img)
+            
+            # adjust reference points for crop
+            for ref_x, ref_y in shot_ref_points:
+                adj_x = ref_x - x1
+                adj_y = ref_y - y1
+                adjusted_ref_points.append((adj_x, adj_y))
+            
+            shot_images = cropped_shot_images
+            shot_ref_points = adjusted_ref_points
+        
+        # align images within this shot
+        aligned_shot_images, transforms = cnn_aligner.align_to_reference_cnn(
+            shot_images, 
+            reference_index=0,  # use first image of shot as reference
+            reference_points=shot_ref_points
+        )
+        
+        if aligned_shot_images:
+            return shot_num, aligned_shot_images, True
+        else:
+            return shot_num, shot_images, False
+            
+    except Exception as e:
+        # return original images on error
+        return shot_num, shot_images, False
+
+def match_histogram_worker(task_data):
+    """worker function for parallel histogram matching"""
+    shot_num, shot_indices, shot_aligned_images, method, strength = task_data
+    
+    try:
+        # use first image of shot as reference for histogram matching
+        reference_img = shot_aligned_images[0]
+        shot_matched = []
+        
+        for i, img in enumerate(shot_aligned_images):
+            if i == 0:
+                # reference image stays unchanged
+                shot_matched.append(img)
+            else:
+                # match to shot reference
+                if method == 'adaptive':
+                    matcher = HistogramMatcher(0)  # reference index 0 within shot
+                    matched_img = matcher.adaptive_histogram_match(img, reference_img, strength)
+                else:
+                    # basic histogram matching fallback - implement simple version here
+                    matched_img = basic_histogram_match_worker(img, reference_img)
+                
+                shot_matched.append(matched_img)
+        
+        return shot_num, shot_matched
+        
+    except Exception as e:
+        # return original images on error
+        return shot_num, shot_aligned_images
+
+def basic_histogram_match_worker(source, reference):
+    """basic histogram matching for worker processes"""
+    # convert to LAB color space for better color preservation
+    source_lab = cv2.cvtColor(source, cv2.COLOR_RGB2LAB)
+    reference_lab = cv2.cvtColor(reference, cv2.COLOR_RGB2LAB)
+    
+    # match each channel separately
+    matched_lab = np.zeros_like(source_lab)
+    
+    for i in range(3):
+        source_channel = source_lab[:, :, i]
+        reference_channel = reference_lab[:, :, i]
+        
+        # calculate CDFs
+        source_hist, bins = np.histogram(source_channel.flatten(), 256, [0, 256])
+        reference_hist, _ = np.histogram(reference_channel.flatten(), 256, [0, 256])
+        
+        source_cdf = source_hist.cumsum()
+        reference_cdf = reference_hist.cumsum()
+        
+        # normalize CDFs
+        source_cdf = source_cdf / source_cdf[-1]
+        reference_cdf = reference_cdf / reference_cdf[-1]
+        
+        # create lookup table
+        lookup_table = np.interp(source_cdf, reference_cdf, np.arange(256))
+        
+        # apply lookup table
+        matched_lab[:, :, i] = lookup_table[source_channel]
+    
+    # convert back to RGB
+    matched_rgb = cv2.cvtColor(matched_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return matched_rgb
 
 class InteractiveCropper:
     """interactive gui for selecting crop area and reference points"""
@@ -1146,8 +1828,20 @@ class GifExporter:
             pil_images.append(pil_img)
             print(f"✅ frame {i+1} converted")
         
-        # create bounce effect if requested
-        if bounce and len(pil_images) > 1:
+        # handle different frame count scenarios
+        if len(pil_images) == 3:
+            # special case for 3 frames: 1-2-3-2-1 pattern (analog film edge case)
+            print("🔄 creating 3-frame bounce effect (1-2-3-2-1)...")
+            bounce_frames = [pil_images[0], pil_images[1], pil_images[2], pil_images[1], pil_images[0]]
+            print(f"📊 3-frame sequence: 1→2→3→2→1 = {len(bounce_frames)} total frames")
+            pil_images = bounce_frames
+        elif len(pil_images) > 4:
+            # for 5+ frames: continuous forward iteration (multi-shot combination)
+            print(f"🔄 creating continuous sequence with {len(pil_images)} frames...")
+            print("📊 continuous forward iteration (no bounce for multi-shot)")
+            # keep original sequence, no bounce
+        elif bounce and len(pil_images) > 1:
+            # standard 4-frame bounce: forward + backward
             print("🔄 creating bounce effect...")
             # forward sequence: 0, 1, 2, 3, ...
             forward_frames = pil_images
@@ -1210,8 +1904,13 @@ def add_methods_to_processor(processor):
             print(f"❌ image index {image_index} out of range")
             return False
             
-        cropper = InteractiveCropper(self.images[image_index])
-        crop_coords, ref_points = cropper.select_crop_and_reference()
+        try:
+            cropper = InteractiveCropper(self.images[image_index])
+            crop_coords, ref_points = cropper.select_crop_and_reference()
+        except Exception as e:
+            print(f"❌ failed to create crop selector: {e}")
+            print("⚠️  continuing without crop selection...")
+            return False
         
         if crop_coords:
             self.crop_box = crop_coords
@@ -1414,9 +2113,16 @@ def add_methods_to_processor(processor):
         if success:
             # show file info (file size is now shown in create_gif)
             print(f"🎯 frames: {len(self.matched_images)}")
-            if bounce and len(self.matched_images) > 1:
-                bounce_frames = len(self.matched_images) + (len(self.matched_images) - 2)
+            
+            # show frame sequence info based on frame count
+            if len(self.matched_images) == 3:
+                print(f"🔄 bounce frames: 5 (1-2-3-2-1 sequence)")
+            elif len(self.matched_images) > 4:
+                print(f"🔄 continuous frames: {len(self.matched_images)} (forward iteration)")
+            elif bounce and len(self.matched_images) > 1:
+                bounce_frames = len(self.matched_images) + max(0, len(self.matched_images) - 2)
                 print(f"🔄 bounce frames: {bounce_frames} (forward + backward)")
+            
             print(f"⏱️  duration per frame: {duration}s")
             print(f"🏆 quality level: {quality}")
         
@@ -1556,10 +2262,16 @@ def add_methods_to_processor(processor):
     processor.set_output_folder = set_output_folder.__get__(processor, NimsloProcessor)
     processor.crop_to_valid_area = crop_to_valid_area.__get__(processor, NimsloProcessor)
     processor.apply_quality_settings = apply_quality_settings.__get__(processor, NimsloProcessor)
+    
+    # multi-shot methods are already class methods, no need to bind
 
-def process_single_batch(processor, batch_name="batch"):
+def process_single_batch(processor, batch_name="batch", use_parallel=True):
     """process a single batch of images"""
     print(f"\n🎬 processing {batch_name}...")
+    if use_parallel:
+        print("⚡ parallel processing enabled")
+    else:
+        print("🐌 sequential processing mode")
     print("=" * 40)
     
     # load images
@@ -1572,46 +2284,65 @@ def process_single_batch(processor, batch_name="batch"):
     print("🎯 crop selection (close window when done)...")
     processor.select_crop_and_reference()
     
-    # align images
-    print("🧩 aligning images...")
+    # detect shots and apply appropriate alignment strategy
+    print("📸 analyzing image sequence...")
+    processor.detect_shots()
     
-    # force cnn alignment (no user choice)
-    use_cnn = True
-    print("🧠 using cnn border detection alignment (forced)")
-    
-    # try different alignment approaches if needed
-    alignment_success = False
-    reference_index = 0
-    
-    while not alignment_success:
-        if use_cnn:
-            print("🧠 using cnn border detection alignment...")
-            if not processor.align_images_cnn(reference_index=reference_index):
-                print("❌ cnn alignment failed")
-                return False
-        else:
-            print("🔍 using traditional feature-based alignment...")
-            if not processor.align_images(reference_index=reference_index, transform_type='homography'):
-                print("❌ alignment failed")
-                return False
+    if len(processor.images) > 4 and len(processor.shots) > 1:
+        # multi-shot sequence: use shot-specific alignment
+        print("🧩 aligning multi-shot sequence...")
+        if not processor.align_multi_shot_images(use_parallel=use_parallel):
+            print("❌ multi-shot alignment failed")
+            return False
+        alignment_success = True
+    else:
+        # single shot or ≤4 images: use standard alignment
+        print("🧩 aligning single shot...")
         
-        # crop to valid area to remove black bars
-        processor.aligned_images = processor.crop_to_valid_area(processor.aligned_images)
+        # force cnn alignment (no user choice)
+        use_cnn = True
+        print("🧠 using cnn border detection alignment (forced)")
         
-        # simple retry logic - try different reference image if needed
-        if reference_index == 0:
-            reference_index = 1
-            print(f"🔄 trying reference image {reference_index}")
-        else:
-            # if we've tried both reference images, just continue
-            alignment_success = True
-            print("✅ alignment complete, proceeding to histogram matching")
+        # try different alignment approaches if needed
+        alignment_success = False
+        reference_index = 0
+        
+        while not alignment_success:
+            if use_cnn:
+                print("🧠 using cnn border detection alignment...")
+                if not processor.align_images_cnn(reference_index=reference_index):
+                    print("❌ cnn alignment failed")
+                    return False
+            else:
+                print("🔍 using traditional feature-based alignment...")
+                if not processor.align_images(reference_index=reference_index, transform_type='homography'):
+                    print("❌ alignment failed")
+                    return False
+        
+            # crop to valid area to remove black bars
+            processor.aligned_images = processor.crop_to_valid_area(processor.aligned_images)
+            
+            # simple retry logic - try different reference image if needed
+            if reference_index == 0:
+                reference_index = 1
+                print(f"🔄 trying reference image {reference_index}")
+            else:
+                # if we've tried both reference images, just continue
+                alignment_success = True
+                print("✅ alignment complete, proceeding to histogram matching")
     
-    # match histograms
+    # match histograms (shot-aware)
     print("🌈 matching histograms...")
-    if not processor.match_histograms(method='adaptive', strength=0.7):
-        print("❌ histogram matching failed")
-        return False
+    if len(processor.images) > 4 and len(processor.shots) > 1:
+        # multi-shot: match histograms within each shot
+        if not processor.match_histograms_multi_shot(method='adaptive', strength=0.7, use_parallel=use_parallel):
+            print("❌ multi-shot histogram matching failed")
+            return False
+    else:
+        # single shot: standard histogram matching
+        if not processor.match_histograms(method='adaptive', strength=0.7):
+            print("❌ histogram matching failed")
+            return False
     
     # apply quality settings
     print("🎨 applying quality settings...")
@@ -1629,23 +2360,60 @@ def process_single_batch(processor, batch_name="batch"):
 
 def main():
     """main function to run the nimslo processor with batch support"""
+    import sys
+    
+    # check for single-batch mode
+    single_batch = "--single" in sys.argv or "-s" in sys.argv
+    
+    # check for parallel processing options
+    no_parallel = "--no-parallel" in sys.argv or "--sequential" in sys.argv
+    use_parallel = not no_parallel
+    
+    # check for process isolation (restart python between batches)
+    process_isolation = "--isolate" in sys.argv or "--restart" in sys.argv
+    
+    if single_batch:
+        print("🎬 nimslo auto-aligning gif processor")
+        print("🚀 single batch mode")
+        print("=" * 50)
+        
+        processor = NimsloProcessor()
+        add_methods_to_processor(processor)
+        
+        success = process_single_batch(processor, "single batch", use_parallel)
+        
+        if success:
+            print("\n🎉 single batch completed successfully!")
+        else:
+            print("\n❌ single batch failed")
+        
+        return
+    
     print("🎬 nimslo auto-aligning gif processor")
     print("🚀 streamlined batch processing mode")
+    print("💡 tip: use --single or -s flag for single batch mode (no tkinter cleanup issues)")
+    print(f"⚡ parallel processing: {'enabled' if use_parallel else 'disabled'}")
+    print("💡 tip: use --no-parallel or --sequential to disable parallel processing")
+    if process_isolation:
+        print("🔒 process isolation: enabled (restart python between batches)")
+        print("💡 this should prevent all tkinter crashes but is slower")
     print("=" * 50)
     
     # create processor
     processor = NimsloProcessor()
     add_methods_to_processor(processor)
     
-    # batch processing loop
+    # batch processing loop with safety limit
     batch_count = 0
-    while True:
+    max_batches = 10  # safety limit to prevent infinite tkinter crashes
+    
+    while batch_count < max_batches:
         batch_count += 1
         print(f"\n📦 batch {batch_count}")
         print("-" * 30)
         
         # process this batch
-        success = process_single_batch(processor, f"batch {batch_count}")
+        success = process_single_batch(processor, f"batch {batch_count}", use_parallel)
         
         if not success:
             print("❌ batch processing failed")
@@ -1670,12 +2438,41 @@ def main():
         if not continue_processing:
             break
         
-        # reset processor for next batch
-        processor.reset()
-        
-        # small delay to ensure cleanup
-        import time
-        time.sleep(0.5)
+        if process_isolation:
+            # restart python process completely to avoid tkinter issues
+            print("🔄 restarting python process for complete isolation...")
+            import subprocess
+            import sys
+            
+            # reconstruct the command with same arguments but add batch continuation marker
+            args = [sys.executable, __file__] + [arg for arg in sys.argv[1:] if arg not in ["--isolate", "--restart"]]
+            args.append("--continue-batch")  # internal flag to continue processing
+            
+            try:
+                subprocess.run(args, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"❌ process restart failed: {e}")
+                break
+            
+            # exit this process since we delegated to the new one
+            print("✅ delegated to new process, exiting...")
+            return
+        else:
+            # reset processor for next batch
+            processor.reset()
+            
+            # ULTRA LONG delay to prevent tkinter segfaults on macos
+            import time
+            print("⏳ waiting 5 seconds for complete cleanup...")
+            time.sleep(5.0)
+            
+            # additional safety: try to force python garbage collection again
+            import gc
+            gc.collect()
+            print("🧹 final cleanup complete")
+    
+    if batch_count >= max_batches:
+        print(f"\n🛑 reached safety limit of {max_batches} batches")
     
     print(f"\n🎉 processing complete! processed {batch_count} batch(es)")
 
