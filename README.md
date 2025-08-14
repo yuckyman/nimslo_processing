@@ -16,18 +16,6 @@
 
 ## quick start
 
-### one-command setup
-```bash
-# from anywhere on your system
-nimslo
-```
-
-that's it! the alias will:
-1. activate the conda environment
-2. run the processor with full gui
-3. generate your nimslo gif automatically
-
-### first-time setup
 ```bash
 # clone and setup
 git clone <repo-url>
