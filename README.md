@@ -1,12 +1,12 @@
 # nimslo auto-aligning gif processor
 
-## 🎬 what it does
+## what it does
 - processes nimslo 3d film shots into smooth animated gifs
 - uses cnn-based border detection for precise alignment
 - applies histogram matching for consistent exposure
 - creates bounce-effect gifs with automatic quality optimization
 
-## ✨ features
+## features
 - **manual image selection** - pick and order your best 4-6 frames
 - **cnn alignment** - sophisticated border detection and image subtraction
 - **automatic cropping** - removes black bars from aligned images
@@ -14,7 +14,7 @@
 - **bounce effect** - smooth back-and-forth animation
 - **streamlined workflow** - no confirmation dialogs, just results
 
-## 🚀 quick start
+## quick start
 
 ### one-command setup
 ```bash
@@ -39,7 +39,7 @@ echo 'alias nimslo="cd $(pwd) && ./run_nimslo.sh"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-## 🎯 workflow
+## workflow
 1. **run `nimslo`** - launches the processor
 2. **select folder** - choose your nimslo image directory
 3. **pick images** - use the gui to select and order 4-6 frames
@@ -48,12 +48,12 @@ source ~/.zshrc
 6. **automatic processing** - intelligent alignment, histogram matching, gif creation
 7. **output** - find your gif in `nimslo_gifs/`
 
-## 📁 output
+## output
 - **gifs** saved to `nimslo_gifs/nimslo_high_TIMESTAMP.gif`
 - **previews** saved as `preview_original.png`, `preview_aligned.png`, `preview_final.png`
 - **quality levels** indicated in filename
 
-## 🔧 technical details
+## technical details
 - **intelligent alignment** - reference point-based (photoshop-style) or cnn border detection
 - **sift feature matching** - robust point correspondence detection
 - **multi-transformation support** - homography (3+ points) or affine (2 points)
@@ -62,7 +62,7 @@ source ~/.zshrc
 - **automatic cropping** - removes transformation artifacts
 - **bounce animation** - forward + backward sequence for smooth motion
 
-## 📦 dependencies
+## dependencies
 - tensorflow 2.16+ (for cnn alignment)
 - opencv-python (computer vision + sift features)
 - pillow (image processing)
@@ -71,8 +71,3 @@ source ~/.zshrc
 - scikit-image (quality metrics)
 
 all managed via conda environment - just run `conda env create -f environment.yml`
-
----
-
-**made with ❤️  for analog photography lovers**  
-*turning nimslo film into digital magic* ✨
